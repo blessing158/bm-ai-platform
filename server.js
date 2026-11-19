@@ -13,7 +13,7 @@ const server = http.createServer(async (req, res) => {
     }));
   }
 
-  if (req.method !== "POST" || req.url !== "/api/chat") {
+  if (req.method === "GET" && new URL(req.url, "http://localhost").pathname === "/") {
     res.writeHead(404);
     return res.end(JSON.stringify({ error: "Not found" }));
   }
