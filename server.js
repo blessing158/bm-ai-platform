@@ -1,3 +1,4 @@
+
 import http from "node:http";
 
 const PORT = process.env.PORT || 3000;
@@ -5,17 +6,24 @@ const PORT = process.env.PORT || 3000;
 const server = http.createServer(async (req, res) => {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
 
-  if (req.method === "GET" && req.url === "/") {
+  const pathname = new URL(req.url, "http://localhost").pathname;
+
+  // Health check
+  if (req.method === "GET" && pathname === "/") {
     res.writeHead(200);
     return res.end(JSON.stringify({
       status: "healthy",
-      service: "BM AI"
+      service: "BM AI",
+      version: "1.0.0"
     }));
   }
 
-  if (req.method === "GET" && new URL(req.url, "http://localhost").pathname === "/") {
+  // Chat endpoint
+  if (req.method !== "POST" || pathname !== "/api/chat") {
     res.writeHead(404);
-    return res.end(JSON.stringify({ error: "Not found" }));
+    return res.end(JSON.stringify({
+      error: "Not found"
+    }));
   }
 
   const apiKey = process.env.GEMINI_API_KEY;
@@ -72,7 +80,9 @@ const server = http.createServer(async (req, res) => {
         body: JSON.stringify({
           contents: [
             {
-              parts: [{ text: message }]
+              parts: [
+                { text: message.trim() }
+              ]
             }
           ]
         })
@@ -82,6 +92,8 @@ const server = http.createServer(async (req, res) => {
     const data = await response.json();
 
     if (!response.ok) {
+      console.error("Gemini API error:", data.error?.message);
+
       res.writeHead(response.status);
       return res.end(JSON.stringify({
         error: data.error?.message || "Gemini request failed"
@@ -93,7 +105,9 @@ const server = http.createServer(async (req, res) => {
       .join("") || "No response received.";
 
     res.writeHead(200);
-    return res.end(JSON.stringify({ answer }));
+    return res.end(JSON.stringify({
+      answer: answer
+    }));
 
   } catch (error) {
     console.error("BM AI error:", error);
@@ -108,3 +122,4 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`BM AI server running on port ${PORT}`);
 });
+                    
