@@ -11,6 +11,7 @@ setGlobalDispatcher(new Agent({
 }));
 
 const server = http.createServer(async (req, res) => {
+
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -29,7 +30,8 @@ const server = http.createServer(async (req, res) => {
       status: "healthy",
       service: "BM AI",
       provider: "Groq",
-      version: "1.0.0"
+      vision: true,
+      version: "1.1.0"
     }));
   }
 
@@ -50,18 +52,25 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    let body = "";
+
+    const chunks = [];
+    let totalSize = 0;
 
     for await (const chunk of req) {
-      body += chunk;
 
-      if (body.length > 100000) {
+      totalSize += chunk.length;
+
+      if (totalSize > 12 * 1024 * 1024) {
         res.writeHead(413);
         return res.end(JSON.stringify({
-          error: "Request too large"
+          error: "Request too large. Please choose a smaller photo."
         }));
       }
+
+      chunks.push(chunk);
     }
+
+    const body = Buffer.concat(chunks).toString("utf8");
 
     let parsed;
 
@@ -75,12 +84,63 @@ const server = http.createServer(async (req, res) => {
     }
 
     const message = parsed.message;
+    const imageData = parsed.imageData;
 
     if (typeof message !== "string" || !message.trim()) {
       res.writeHead(400);
       return res.end(JSON.stringify({
         error: "Please provide a message"
       }));
+    }
+
+    let model = "openai/gpt-oss-20b";
+    let userContent = message.trim();
+
+    if (imageData) {
+
+      if (typeof imageData !== "string") {
+        res.writeHead(400);
+        return res.end(JSON.stringify({
+          error: "Invalid image data"
+        }));
+      }
+
+      const match = imageData.match(
+        /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/
+      );
+
+      if (!match) {
+        res.writeHead(400);
+        return res.end(JSON.stringify({
+          error: "Unsupported image format. Use JPG, PNG or WEBP."
+        }));
+      }
+
+      const mimeType = match[1];
+
+      const base64 = match[2];
+
+      if (base64.length > 10 * 1024 * 1024) {
+        res.writeHead(413);
+        return res.end(JSON.stringify({
+          error: "Photo is too large. Please choose a smaller photo."
+        }));
+      }
+
+      model = "qwen/qwen3.8-27b";
+
+      userContent = [
+        {
+          type: "text",
+          text: message.trim()
+        },
+        {
+          type: "image_url",
+          image_url: {
+            url: "data:" + mimeType + ";base64," + base64
+          }
+        }
+      ];
     }
 
     const response = await fetch(
@@ -92,15 +152,15 @@ const server = http.createServer(async (req, res) => {
           "Authorization": `Bearer ${apiKey}`
         },
         body: JSON.stringify({
-          model: "openai/gpt-oss-20b",
+          model: model,
           messages: [
             {
               role: "system",
-              content: "You are BM AI, a helpful, accurate and friendly AI assistant. Give clear and useful answers."
+              content: "You are BM AI, a helpful, accurate and friendly AI assistant. Give clear, useful and well-formatted answers. When an image is provided, carefully analyze its visible contents and answer the user's question."
             },
             {
               role: "user",
-              content: message.trim()
+              content: userContent
             }
           ],
           max_completion_tokens: 1024
@@ -120,6 +180,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (!response.ok) {
+
       console.error("Groq API error:", data.error?.message);
 
       const status = response.status === 429
@@ -129,20 +190,24 @@ const server = http.createServer(async (req, res) => {
           : 502;
 
       res.writeHead(status);
+
       return res.end(JSON.stringify({
         error: data.error?.message || "Groq request failed"
       }));
     }
 
     const answer =
-      data.choices?.[0]?.message?.content || "No response received.";
+      data.choices?.[0]?.message?.content ||
+      "No response received.";
 
     res.writeHead(200);
+
     return res.end(JSON.stringify({
       answer: answer
     }));
 
   } catch (error) {
+
     console.error("BM AI error:", error);
 
     const timedOut =
@@ -162,6 +227,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`BM AI server running on port ${PORT}`);
+  console.log("BM AI server running on port " + PORT);
 });
-  
+                    
