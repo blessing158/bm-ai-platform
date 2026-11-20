@@ -16,6 +16,7 @@ const server = http.createServer(async (req, res) => {
 
   const pathname = new URL(req.url, "http://localhost").pathname;
 
+  // Health check
   if (req.method === "GET" && pathname === "/") {
     res.writeHead(200);
     return res.end(JSON.stringify({
@@ -25,9 +26,12 @@ const server = http.createServer(async (req, res) => {
     }));
   }
 
+  // Chat endpoint
   if (req.method !== "POST" || pathname !== "/api/chat") {
     res.writeHead(404);
-    return res.end(JSON.stringify({ error: "Not found" }));
+    return res.end(JSON.stringify({
+      error: "Not found"
+    }));
   }
 
   const apiKey = process.env.GEMINI_API_KEY;
@@ -74,7 +78,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
       {
         method: "POST",
         headers: {
@@ -82,9 +86,13 @@ const server = http.createServer(async (req, res) => {
           "x-goog-api-key": apiKey
         },
         body: JSON.stringify({
-          contents: [{
-            parts: [{ text: message.trim() }]
-          }]
+          contents: [
+            {
+              parts: [
+                { text: message.trim() }
+              ]
+            }
+          ]
         })
       }
     );
@@ -93,6 +101,7 @@ const server = http.createServer(async (req, res) => {
 
     if (!response.ok) {
       console.error("Gemini API error:", data.error?.message);
+
       res.writeHead(response.status);
       return res.end(JSON.stringify({
         error: data.error?.message || "Gemini request failed"
@@ -104,10 +113,13 @@ const server = http.createServer(async (req, res) => {
       .join("") || "No response received.";
 
     res.writeHead(200);
-    return res.end(JSON.stringify({ answer }));
+    return res.end(JSON.stringify({
+      answer: answer
+    }));
 
   } catch (error) {
     console.error("BM AI error:", error);
+
     res.writeHead(500);
     return res.end(JSON.stringify({
       error: "Unable to process your request"
@@ -118,4 +130,3 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`BM AI server running on port ${PORT}`);
 });
-                                 
