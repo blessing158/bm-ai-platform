@@ -1,8 +1,12 @@
+
 {
   "name": "bm-ai-platform",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
     "start": "node server.js"
+  },
+  "dependencies": {
+    "undici": "^7.16.0"
   }
 }
