@@ -1,7 +1,15 @@
 
 import http from "node:http";
+import { Agent, setGlobalDispatcher } from "undici";
 
 const PORT = process.env.PORT || 3000;
+
+// Allow more time for Gemini responses.
+setGlobalDispatcher(new Agent({
+  headersTimeout: 90000,
+  bodyTimeout: 90000,
+  connectTimeout: 15000
+}));
 
 const server = http.createServer(async (req, res) => {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -16,7 +24,6 @@ const server = http.createServer(async (req, res) => {
 
   const pathname = new URL(req.url, "http://localhost").pathname;
 
-  // Health check
   if (req.method === "GET" && pathname === "/") {
     res.writeHead(200);
     return res.end(JSON.stringify({
@@ -26,7 +33,6 @@ const server = http.createServer(async (req, res) => {
     }));
   }
 
-  // Chat endpoint
   if (req.method !== "POST" || pathname !== "/api/chat") {
     res.writeHead(404);
     return res.end(JSON.stringify({
@@ -86,23 +92,34 @@ const server = http.createServer(async (req, res) => {
           "x-goog-api-key": apiKey
         },
         body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                { text: message.trim() }
-              ]
-            }
-          ]
-        })
+          contents: [{
+            parts: [{
+              text: message.trim()
+            }]
+          }]
+        }),
+        signal: AbortSignal.timeout(80000)
       }
     );
 
-    const data = await response.json();
+    const responseText = await response.text();
+
+    let data;
+
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      throw new Error("Gemini returned an invalid response.");
+    }
 
     if (!response.ok) {
       console.error("Gemini API error:", data.error?.message);
 
-      res.writeHead(response.status);
+      const status = [429, 503, 504].includes(response.status)
+        ? 503
+        : response.status;
+
+      res.writeHead(status);
       return res.end(JSON.stringify({
         error: data.error?.message || "Gemini request failed"
       }));
@@ -120,9 +137,18 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     console.error("BM AI error:", error);
 
-    res.writeHead(500);
+    const timedOut =
+      error.name === "TimeoutError" ||
+      error.name === "AbortError" ||
+      error.code === "UND_ERR_HEADERS_TIMEOUT" ||
+      error.code === "UND_ERR_BODY_TIMEOUT";
+
+    res.writeHead(timedOut ? 504 : 500);
+
     return res.end(JSON.stringify({
-      error: "Unable to process your request"
+      error: timedOut
+        ? "Gemini is taking too long to respond. Please try again."
+        : "Unable to process your request. Please try again."
     }));
   }
 });
@@ -130,3 +156,4 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`BM AI server running on port ${PORT}`);
 });
+                
