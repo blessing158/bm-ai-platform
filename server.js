@@ -4,7 +4,6 @@ import { Agent, setGlobalDispatcher } from "undici";
 
 const PORT = process.env.PORT || 3000;
 
-// Allow more time for Gemini responses.
 setGlobalDispatcher(new Agent({
   headersTimeout: 90000,
   bodyTimeout: 90000,
@@ -29,6 +28,7 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({
       status: "healthy",
       service: "BM AI",
+      provider: "Groq",
       version: "1.0.0"
     }));
   }
@@ -40,12 +40,12 @@ const server = http.createServer(async (req, res) => {
     }));
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GROQ_API_KEY;
 
   if (!apiKey) {
     res.writeHead(500);
     return res.end(JSON.stringify({
-      error: "Gemini API key is not configured"
+      error: "Groq API key is not configured"
     }));
   }
 
@@ -84,19 +84,26 @@ const server = http.createServer(async (req, res) => {
     }
 
     const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+      "https://api.groq.com/openai/v1/chat/completions",
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-goog-api-key": apiKey
+          "Authorization": `Bearer ${apiKey}`
         },
         body: JSON.stringify({
-          contents: [{
-            parts: [{
-              text: message.trim()
-            }]
-          }]
+          model: "openai/gpt-oss-20b",
+          messages: [
+            {
+              role: "system",
+              content: "You are BM AI, a helpful, accurate and friendly AI assistant. Give clear and useful answers."
+            },
+            {
+              role: "user",
+              content: message.trim()
+            }
+          ],
+          max_completion_tokens: 1024
         }),
         signal: AbortSignal.timeout(80000)
       }
@@ -109,25 +116,26 @@ const server = http.createServer(async (req, res) => {
     try {
       data = JSON.parse(responseText);
     } catch {
-      throw new Error("Gemini returned an invalid response.");
+      throw new Error("Groq returned an invalid response.");
     }
 
     if (!response.ok) {
-      console.error("Gemini API error:", data.error?.message);
+      console.error("Groq API error:", data.error?.message);
 
-      const status = [429, 503, 504].includes(response.status)
-        ? 503
-        : response.status;
+      const status = response.status === 429
+        ? 429
+        : response.status >= 500
+          ? 503
+          : 502;
 
       res.writeHead(status);
       return res.end(JSON.stringify({
-        error: data.error?.message || "Gemini request failed"
+        error: data.error?.message || "Groq request failed"
       }));
     }
 
-    const answer = data.candidates?.[0]?.content?.parts
-      ?.map(part => part.text || "")
-      .join("") || "No response received.";
+    const answer =
+      data.choices?.[0]?.message?.content || "No response received.";
 
     res.writeHead(200);
     return res.end(JSON.stringify({
@@ -147,7 +155,7 @@ const server = http.createServer(async (req, res) => {
 
     return res.end(JSON.stringify({
       error: timedOut
-        ? "Gemini is taking too long to respond. Please try again."
+        ? "Groq is taking too long to respond. Please try again."
         : "Unable to process your request. Please try again."
     }));
   }
@@ -156,4 +164,4 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`BM AI server running on port ${PORT}`);
 });
-                
+  
