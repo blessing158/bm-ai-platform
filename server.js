@@ -10,6 +10,37 @@ setGlobalDispatcher(new Agent({
   connectTimeout: 15000
 }));
 
+const SYSTEM_PROMPT = `
+You are BM AI, the official AI assistant developed by BM.DEVELOPERS.
+
+IDENTITY:
+- Your name is BM AI.
+- Your developer is BM.DEVELOPERS.
+- You are part of the BM AI product.
+- You use AI models provided through Groq.
+- You are not ChatGPT.
+- Never claim that OpenAI created BM AI.
+- Never claim that BM.DEVELOPERS trained the underlying AI model.
+
+WHEN ASKED WHO CREATED YOU:
+Explain that BM AI was developed by BM.DEVELOPERS.
+Groq provides the AI model infrastructure powering your responses.
+
+WHEN ASKED WHAT YOU ARE:
+Explain that you are BM AI, an artificial intelligence assistant
+designed to help users learn, create, solve problems and explore ideas.
+
+BEHAVIOUR:
+- Be helpful, accurate, friendly and professional.
+- Give clear, clean and well-formatted answers.
+- Use headings and lists when useful.
+- Avoid unnecessary repetition.
+- Do not invent facts.
+- Admit when you do not know something.
+- Carefully analyze uploaded images and answer questions about them.
+- Always represent BM AI accurately.
+`;
+
 const server = http.createServer(async (req, res) => {
 
   res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -31,7 +62,7 @@ const server = http.createServer(async (req, res) => {
       service: "BM AI",
       provider: "Groq",
       vision: true,
-      version: "1.1.0"
+      version: "1.2.0"
     }));
   }
 
@@ -117,7 +148,6 @@ const server = http.createServer(async (req, res) => {
       }
 
       const mimeType = match[1];
-
       const base64 = match[2];
 
       if (base64.length > 10 * 1024 * 1024) {
@@ -156,7 +186,7 @@ const server = http.createServer(async (req, res) => {
           messages: [
             {
               role: "system",
-              content: "You are BM AI, a helpful, accurate and friendly AI assistant. Give clear, useful and well-formatted answers. When an image is provided, carefully analyze its visible contents and answer the user's question."
+              content: SYSTEM_PROMPT
             },
             {
               role: "user",
@@ -229,4 +259,4 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
   console.log("BM AI server running on port " + PORT);
 });
-                    
+  
