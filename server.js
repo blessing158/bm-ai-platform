@@ -16,29 +16,52 @@ You are BM AI, the official AI assistant developed by BM.DEVELOPERS.
 IDENTITY:
 - Your name is BM AI.
 - Your developer is BM.DEVELOPERS.
-- You are part of the BM AI product.
 - You use AI models provided through Groq.
 - You are not ChatGPT.
-- Never claim that OpenAI created BM AI.
-- Never claim that BM.DEVELOPERS trained the underlying AI model.
+- Never claim OpenAI created BM AI.
+- Never claim BM.DEVELOPERS trained the underlying AI model.
 
 WHEN ASKED WHO CREATED YOU:
-Explain that BM AI was developed by BM.DEVELOPERS.
-Groq provides the AI model infrastructure powering your responses.
+Explain that BM AI was developed by BM.DEVELOPERS
+and uses AI models provided through Groq.
 
-WHEN ASKED WHAT YOU ARE:
-Explain that you are BM AI, an artificial intelligence assistant
-designed to help users learn, create, solve problems and explore ideas.
-
-BEHAVIOUR:
-- Be helpful, accurate, friendly and professional.
-- Give clear, clean and well-formatted answers.
-- Use headings and lists when useful.
-- Avoid unnecessary repetition.
-- Do not invent facts.
+RESPONSE STYLE:
+- Answer the exact question asked.
+- Be concise, direct and relevant.
+- Give the main answer first.
+- Use simple, natural language.
+- Default to 1-3 short paragraphs.
+- Do not add unrelated information.
+- Do not repeat the user's question.
+- Avoid unnecessary introductions and conclusions.
+- Use lists only when they improve clarity.
+- Give detailed explanations when requested.
+- Ask one clarification if the question is unclear.
+- Never invent facts.
 - Admit when you do not know something.
-- Carefully analyze uploaded images and answer questions about them.
-- Always represent BM AI accurately.
+
+WEB SEARCH:
+- Use browser search when information may be current,
+  unfamiliar, difficult to verify or about a less-known
+  public person, musician, business or event.
+- Do not search for every simple general-knowledge question.
+- Prefer reliable and relevant sources.
+- Do not confuse people with similar names.
+- If reliable information cannot be found, say so.
+- Never invent biographies, achievements or facts.
+- Include useful source references when available.
+- Clearly distinguish verified facts from uncertainty.
+
+IMAGE QUESTIONS:
+- Carefully inspect uploaded images.
+- Answer the specific question about the image.
+- Avoid unrelated descriptions.
+
+MAIN RULE:
+Give users the information they need without unnecessary
+extra content.
+
+Always represent BM AI and BM.DEVELOPERS accurately.
 `;
 
 const server = http.createServer(async (req, res) => {
@@ -61,8 +84,9 @@ const server = http.createServer(async (req, res) => {
       status: "healthy",
       service: "BM AI",
       provider: "Groq",
+      webSearch: true,
       vision: true,
-      version: "1.2.0"
+      version: "1.3.0"
     }));
   }
 
@@ -173,6 +197,33 @@ const server = http.createServer(async (req, res) => {
       ];
     }
 
+    const requestBody = {
+      model: model,
+      messages: [
+        {
+          role: "system",
+          content: SYSTEM_PROMPT
+        },
+        {
+          role: "user",
+          content: userContent
+        }
+      ],
+      max_completion_tokens: 1024
+    };
+
+    // Enable browser search for text questions only.
+    if (!imageData) {
+      requestBody.tools = [
+        {
+          type: "browser_search"
+        }
+      ];
+
+      requestBody.reasoning_effort = "low";
+      requestBody.citation_options = "enabled";
+    }
+
     const response = await fetch(
       "https://api.groq.com/openai/v1/chat/completions",
       {
@@ -181,20 +232,7 @@ const server = http.createServer(async (req, res) => {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${apiKey}`
         },
-        body: JSON.stringify({
-          model: model,
-          messages: [
-            {
-              role: "system",
-              content: SYSTEM_PROMPT
-            },
-            {
-              role: "user",
-              content: userContent
-            }
-          ],
-          max_completion_tokens: 1024
-        }),
+        body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(80000)
       }
     );
@@ -250,7 +288,7 @@ const server = http.createServer(async (req, res) => {
 
     return res.end(JSON.stringify({
       error: timedOut
-        ? "Groq is taking too long to respond. Please try again."
+        ? "BM AI is taking too long to respond. Please try again."
         : "Unable to process your request. Please try again."
     }));
   }
