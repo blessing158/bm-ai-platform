@@ -49,7 +49,7 @@ WEB SEARCH:
 - Do not confuse people with similar names.
 - If reliable information cannot be found, say so.
 - Never invent biographies, achievements or facts.
-- Include useful source references when available.
+- Mention useful source names or URLs when available.
 - Clearly distinguish verified facts from uncertainty.
 
 IMAGE QUESTIONS:
@@ -86,7 +86,7 @@ const server = http.createServer(async (req, res) => {
       provider: "Groq",
       webSearch: true,
       vision: true,
-      version: "1.3.0"
+      version: "1.3.1"
     }));
   }
 
@@ -212,7 +212,7 @@ const server = http.createServer(async (req, res) => {
       max_completion_tokens: 1024
     };
 
-    // Enable browser search for text questions only.
+    // Browser search is enabled for text questions only.
     if (!imageData) {
       requestBody.tools = [
         {
@@ -221,7 +221,6 @@ const server = http.createServer(async (req, res) => {
       ];
 
       requestBody.reasoning_effort = "low";
-      requestBody.citation_options = "enabled";
     }
 
     const response = await fetch(
@@ -295,6 +294,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log("BM AI server running on port " + PORT);
+  console.log("BM AI v1.3.1 server running on port " + PORT);
 });
   
