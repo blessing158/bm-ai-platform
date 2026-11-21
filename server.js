@@ -25,6 +25,14 @@ WHEN ASKED WHO CREATED YOU:
 Explain that BM AI was developed by BM.DEVELOPERS
 and uses AI models provided through Groq.
 
+CONVERSATION MEMORY:
+- Use the previous messages in the conversation as context.
+- Remember relevant details the user has already shared in this chat.
+- Understand follow-up questions using earlier messages.
+- Do not ask the user to repeat information already provided.
+- Keep your answers consistent with the conversation.
+- Do not pretend to remember messages that are not provided.
+
 RESPONSE STYLE:
 - Answer the exact question asked.
 - Be concise, direct and relevant.
@@ -86,7 +94,8 @@ const server = http.createServer(async (req, res) => {
       provider: "Groq",
       webSearch: true,
       vision: true,
-      version: "1.3.1"
+      conversationMemory: true,
+      version: "1.4.0"
     }));
   }
 
@@ -140,11 +149,58 @@ const server = http.createServer(async (req, res) => {
 
     const message = parsed.message;
     const imageData = parsed.imageData;
+    const history = parsed.history || [];
 
     if (typeof message !== "string" || !message.trim()) {
       res.writeHead(400);
       return res.end(JSON.stringify({
         error: "Please provide a message"
+      }));
+    }
+
+    if (!Array.isArray(history)) {
+      res.writeHead(400);
+      return res.end(JSON.stringify({
+        error: "Invalid conversation history"
+      }));
+    }
+
+    // Only accept the latest 20 previous messages.
+    // The current message is added separately below.
+    const recentHistory = history.slice(-20);
+
+    const conversationMessages = [];
+
+    for (const item of recentHistory) {
+
+      if (
+        !item ||
+        (item.role !== "user" && item.role !== "assistant") ||
+        typeof item.content !== "string" ||
+        !item.content.trim() ||
+        item.content.length > 4000
+      ) {
+        res.writeHead(400);
+        return res.end(JSON.stringify({
+          error: "Invalid message in conversation history"
+        }));
+      }
+
+      conversationMessages.push({
+        role: item.role,
+        content: item.content
+      });
+    }
+
+    const totalHistoryLength = conversationMessages.reduce(
+      (total, item) => total + item.content.length,
+      0
+    );
+
+    if (totalHistoryLength > 30000) {
+      res.writeHead(400);
+      return res.end(JSON.stringify({
+        error: "Conversation is too long. Please start a new chat."
       }));
     }
 
@@ -197,18 +253,21 @@ const server = http.createServer(async (req, res) => {
       ];
     }
 
+    const messages = [
+      {
+        role: "system",
+        content: SYSTEM_PROMPT
+      },
+      ...conversationMessages,
+      {
+        role: "user",
+        content: userContent
+      }
+    ];
+
     const requestBody = {
       model: model,
-      messages: [
-        {
-          role: "system",
-          content: SYSTEM_PROMPT
-        },
-        {
-          role: "user",
-          content: userContent
-        }
-      ],
+      messages: messages,
       max_completion_tokens: 1024
     };
 
@@ -294,6 +353,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log("BM AI v1.3.1 server running on port " + PORT);
+  console.log("BM AI v1.4.0 server running on port " + PORT);
 });
   
