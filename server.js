@@ -4,21 +4,11 @@ import { Agent, setGlobalDispatcher } from "undici";
 
 const PORT = process.env.PORT || 3000;
 
-// Google Gemini
-const GEMINI_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL =
-  process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
-
-// Future independent BM AI model.
-// This must point to an OpenAI-compatible model server.
+// BM AI's own model configuration
 const BM_MODEL_URL = process.env.BM_AI_MODEL_URL;
 const BM_MODEL_KEY = process.env.BM_AI_MODEL_API_KEY;
 const BM_MODEL_NAME =
-  process.env.BM_AI_MODEL_NAME || "qwen2.5-3b-instruct";
-
-// Search is disabled unless explicitly enabled.
-const WEB_SEARCH_ENABLED =
-  process.env.BM_AI_WEB_SEARCH_ENABLED === "true";
+  process.env.BM_AI_MODEL_NAME || "bm-ai-1m";
 
 setGlobalDispatcher(new Agent({
   headersTimeout: 90000,
@@ -32,9 +22,9 @@ You are BM AI, the official AI assistant developed by BM.DEVELOPERS.
 IDENTITY:
 - Your name is BM AI.
 - Your developer is BM.DEVELOPERS.
-- You may use BM.DEVELOPERS' own model infrastructure and Google Gemini.
-- Never claim OpenAI created BM AI.
-- Never claim BM.DEVELOPERS trained an underlying model unless verified.
+- Use BM.DEVELOPERS' own model infrastructure only.
+- Never claim another company created BM AI.
+- Never claim the model has been trained beyond what is verified.
 
 CONVERSATION:
 - Use the supplied conversation history.
@@ -51,77 +41,22 @@ RESPONSE STYLE:
 - Never invent facts.
 - Admit when you do not know.
 
-WEB RESEARCH:
-- Use search tools when available and useful.
-- Prefer reliable sources.
-- Never invent URLs, citations, biographies or achievements.
+ACCURACY:
+- Never invent sources, URLs, citations or achievements.
 - Clearly distinguish verified facts from uncertainty.
-- When you cannot verify something, say so.
-
-IMAGE QUESTIONS:
-- Carefully inspect uploaded images.
-- Answer the user's specific question about the image.
+- Be honest about your capabilities and limitations.
 
 MAIN RULE:
 Give users accurate and useful information.
-
 Always represent BM AI and BM.DEVELOPERS accurately.
 `;
 
 function send(res, status, data) {
-  res.writeHead(status);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8"
+  });
+
   res.end(JSON.stringify(data));
-}
-
-function isValidImage(imageData) {
-  return typeof imageData === "string" &&
-    /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(imageData);
-}
-
-function extractGeminiText(data) {
-  const parts =
-    data.candidates?.[0]?.content?.parts || [];
-
-  return parts
-    .filter(part => typeof part.text === "string")
-    .map(part => part.text)
-    .join("\n")
-    .trim();
-}
-
-function extractGeminiSources(data) {
-  const chunks =
-    data.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-
-  return chunks
-    .filter(item => item.web?.uri)
-    .map(item => ({
-      title: item.web.title || item.web.uri,
-      url: item.web.uri
-    }));
-}
-
-function appendSources(answer, sources) {
-  const unique = [];
-  const seen = new Set();
-
-  for (const source of sources) {
-    if (!source.url || seen.has(source.url)) {
-      continue;
-    }
-
-    seen.add(source.url);
-    unique.push(source);
-  }
-
-  if (unique.length === 0) {
-    return answer;
-  }
-
-  return answer + "\n\nSources:\n" +
-    unique.slice(0, 6).map(source =>
-      "- " + source.title + ": " + source.url
-    ).join("\n");
 }
 
 function extractOwnModelText(data) {
@@ -142,10 +77,10 @@ function extractOwnModelText(data) {
   return "";
 }
 
-// BM AI's future independent model.
+// Connect to BM AI's Python model.
 async function callOwnModel(message, history) {
   if (!BM_MODEL_URL) {
-    throw new Error("BM AI model is not configured.");
+    throw new Error("BM AI model URL is not configured.");
   }
 
   const messages = [
@@ -184,11 +119,17 @@ async function callOwnModel(message, history) {
     signal: AbortSignal.timeout(80000)
   });
 
-  const data = await response.json();
+  let data;
+
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error("BM AI model returned an invalid response.");
+  }
 
   if (!response.ok) {
     console.error(
-      "BM model API error:",
+      "BM AI model API error:",
       data.error?.message || response.status
     );
 
@@ -204,169 +145,19 @@ async function callOwnModel(message, history) {
   return answer;
 }
 
-// Google Gemini.
-async function callGemini(message, history, imageData) {
-  if (!GEMINI_KEY) {
-    throw new Error("Gemini API key is not configured.");
-  }
+// All requests use BM AI's own model.
+// There is NO Gemini or third-party AI fallback.
+async function generateAnswer(message, history) {
+  const answer = await callOwnModel(message, history);
 
-  const contents = [];
-
-  for (const item of history) {
-    contents.push({
-      role: item.role === "assistant" ? "model" : "user",
-      parts: [{ text: item.content }]
-    });
-  }
-
-  const currentParts = [
-    { text: message }
-  ];
-
-  if (imageData) {
-    if (!isValidImage(imageData)) {
-      throw new Error("Unsupported image format.");
-    }
-
-    const match = imageData.match(
-      /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/
-    );
-
-    currentParts.push({
-      inlineData: {
-        mimeType: match[1],
-        data: match[2]
-      }
-    });
-  }
-
-  contents.push({
-    role: "user",
-    parts: currentParts
-  });
-
-  const requestBody = {
-    systemInstruction: {
-      parts: [{ text: SYSTEM_PROMPT }]
-    },
-    contents: contents,
-    generationConfig: {
-      maxOutputTokens: 2048
-    }
-  };
-
-  if (WEB_SEARCH_ENABLED && !imageData) {
-    requestBody.tools = [
-      { google_search: {} }
-    ];
-  }
-
-  const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/" +
-      GEMINI_MODEL + ":generateContent",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_KEY
-      },
-      body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(80000)
-    }
-  );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    console.error(
-      "Gemini API error:",
-      data.error?.message || response.status
-    );
-
-    throw new Error("Gemini request failed.");
-  }
-
-  const answer = extractGeminiText(data);
-
-  if (!answer) {
-    throw new Error("Gemini returned an empty response.");
-  }
-
-  return appendSources(
-    answer,
-    extractGeminiSources(data)
-  );
-}
-
-async function generateAnswer(message, history, imageData) {
-
-  // Images currently go directly to Gemini.
-  if (imageData) {
-    return {
-      answer: await callGemini(
-        message,
-        history,
-        imageData
-      ),
-      provider: "gemini",
-      fallbackUsed: false
-    };
-  }
-
-  // If our own model is configured, try it first.
-  if (BM_MODEL_URL) {
-    try {
-      const answer = await callOwnModel(
-        message,
-        history
-      );
-
-      return {
-        answer: answer,
-        provider: "bm-ai",
-        fallbackUsed: false
-      };
-
-    } catch (error) {
-      console.error(
-        "BM AI model failed:",
-        error.message
-      );
-
-      // Gemini becomes the fallback.
-      const answer = await callGemini(
-        message,
-        history,
-        null
-      );
-
-      return {
-        answer: answer,
-        provider: "gemini",
-        fallbackUsed: true
-      };
-    }
-  }
-
-  // Until our model is hosted, use Gemini.
   return {
-    answer: await callGemini(
-      message,
-      history,
-      null
-    ),
-    provider: "gemini",
+    answer: answer,
+    provider: "bm-ai",
     fallbackUsed: false
   };
 }
 
 const server = http.createServer(async (req, res) => {
-
-  res.setHeader(
-    "Content-Type",
-    "application/json; charset=utf-8"
-  );
-
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader(
     "Access-Control-Allow-Methods",
@@ -387,20 +178,20 @@ const server = http.createServer(async (req, res) => {
     "http://localhost"
   ).pathname;
 
-  // Health check.
+  // Health check
   if (req.method === "GET" && pathname === "/") {
     return send(res, 200, {
       status: "healthy",
       service: "BM AI",
       providers: {
-        bmAi: !!BM_MODEL_URL,
-        gemini: !!GEMINI_KEY
+        bmAi: !!BM_MODEL_URL
       },
-      automaticRouting: true,
-      webSearch: WEB_SEARCH_ENABLED,
-      vision: true,
+      automaticRouting: false,
+      fallbackEnabled: false,
+      vision: false,
+      webSearch: false,
       conversationMemory: true,
-      version: "3.0.0"
+      version: "4.0.0"
     });
   }
 
@@ -419,7 +210,7 @@ const server = http.createServer(async (req, res) => {
 
       if (totalSize > 12 * 1024 * 1024) {
         return send(res, 413, {
-          error: "Request too large. Choose a smaller photo."
+          error: "Request too large."
         });
       }
 
@@ -439,8 +230,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     const message = parsed.message;
-    const imageData = parsed.imageData;
     const history = parsed.history || [];
+
+    // Images are not supported by the current model.
+    if (parsed.imageData) {
+      return send(res, 400, {
+        error: "Image input is not supported by BM AI yet."
+      });
+    }
 
     if (
       typeof message !== "string" ||
@@ -454,18 +251,6 @@ const server = http.createServer(async (req, res) => {
     if (!Array.isArray(history)) {
       return send(res, 400, {
         error: "Invalid conversation history."
-      });
-    }
-
-    if (imageData && !isValidImage(imageData)) {
-      return send(res, 400, {
-        error: "Unsupported image format. Use JPG, PNG or WEBP."
-      });
-    }
-
-    if (imageData && imageData.length > 10 * 1024 * 1024) {
-      return send(res, 413, {
-        error: "Photo is too large."
       });
     }
 
@@ -504,15 +289,14 @@ const server = http.createServer(async (req, res) => {
 
     const result = await generateAnswer(
       message.trim(),
-      conversationMessages,
-      imageData
+      conversationMessages
     );
 
     return send(res, 200, {
       answer: result.answer,
       provider: result.provider,
-      automaticRouting: true,
-      fallbackUsed: result.fallbackUsed
+      automaticRouting: false,
+      fallbackUsed: false
     });
 
   } catch (error) {
@@ -527,30 +311,16 @@ const server = http.createServer(async (req, res) => {
     return send(res, timedOut ? 504 : 502, {
       error: timedOut
         ? "BM AI is taking too long. Please try again."
-        : "Unable to process your request. Check your AI provider configuration."
+        : "BM AI's own model could not process your request."
     });
   }
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(
-    "BM AI v3.0.0 running on port " + PORT
-  );
-
-  console.log(
-    "Gemini configured: " + !!GEMINI_KEY
-  );
-
-  console.log(
-    "BM AI own model configured: " + !!BM_MODEL_URL
-  );
-
-  console.log(
-    "Grok integration: removed"
-  );
-
-  console.log(
-    "Automatic routing enabled."
-  );
+  console.log("BM AI v4.0.0 running on port " + PORT);
+  console.log("BM AI own model configured: " + !!BM_MODEL_URL);
+  console.log("Third-party AI providers: disabled");
+  console.log("Gemini integration: removed");
+  console.log("Fallback: disabled");
 });
-  
+      
