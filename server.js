@@ -4,14 +4,17 @@ import { Agent, setGlobalDispatcher } from "undici";
 
 const PORT = process.env.PORT || 3000;
 
+// Google Gemini
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
-const XAI_KEY = process.env.XAI_API_KEY;
-
 const GEMINI_MODEL =
   process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 
-const GROK_MODEL =
-  process.env.XAI_MODEL || "grok-4.7";
+// Future independent BM AI model.
+// This must point to an OpenAI-compatible model server.
+const BM_MODEL_URL = process.env.BM_AI_MODEL_URL;
+const BM_MODEL_KEY = process.env.BM_AI_MODEL_API_KEY;
+const BM_MODEL_NAME =
+  process.env.BM_AI_MODEL_NAME || "qwen2.5-3b-instruct";
 
 // Search is disabled unless explicitly enabled.
 const WEB_SEARCH_ENABLED =
@@ -29,9 +32,9 @@ You are BM AI, the official AI assistant developed by BM.DEVELOPERS.
 IDENTITY:
 - Your name is BM AI.
 - Your developer is BM.DEVELOPERS.
-- You use AI models from Google Gemini and xAI Grok.
+- You may use BM.DEVELOPERS' own model infrastructure and Google Gemini.
 - Never claim OpenAI created BM AI.
-- Never claim BM.DEVELOPERS trained the underlying models.
+- Never claim BM.DEVELOPERS trained an underlying model unless verified.
 
 CONVERSATION:
 - Use the supplied conversation history.
@@ -75,73 +78,6 @@ function isValidImage(imageData) {
     /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(imageData);
 }
 
-// Automatic provider selection.
-function selectProvider(message, imageData) {
-  if (imageData) {
-    return "gemini";
-  }
-
-  const text = message.toLowerCase();
-
-  // Questions that benefit from current information.
-  const researchPatterns = [
-    /\blatest\b/,
-    /\btoday\b/,
-    /\bcurrent\b/,
-    /\brecent\b/,
-    /\bnews\b/,
-    /\bsearch\b/,
-    /\blook up\b/,
-    /\bfind information\b/,
-    /\bsource\b/,
-    /\bwebsite\b/,
-    /\blink\b/,
-    /\bprice\b/,
-    /\bweather\b/,
-    /\bwho is\b/,
-    /\bwho was\b/,
-    /\bmusician\b/,
-    /\bsinger\b/,
-    /\bartist\b/,
-    /\bsong\b/,
-    /\bmusic\b/,
-    /\balbum\b/,
-    /\brelease date\b/,
-    /\bbiography\b/,
-    /\bdiscography\b/,
-    /\bwhere can i\b/,
-    /\bwhat happened\b/
-  ];
-
-  for (const pattern of researchPatterns) {
-    if (pattern.test(text)) {
-      return "grok";
-    }
-  }
-
-  // Name-like questions often need research.
-  const words = text.trim().split(/\s+/);
-
-  if (
-    words.length >= 2 &&
-    words.length <= 4 &&
-    text.length <= 65 &&
-    !/\b(the|and|but|because|please|thanks|explain)\b/.test(text)
-  ) {
-    return "grok";
-  }
-
-  // General knowledge, coding and reasoning default to Gemini.
-  return "gemini";
-}
-
-function getHistory(history) {
-  return history.map(item => ({
-    role: item.role,
-    content: item.content
-  }));
-}
-
 function extractGeminiText(data) {
   const parts =
     data.candidates?.[0]?.content?.parts || [];
@@ -163,51 +99,6 @@ function extractGeminiSources(data) {
       title: item.web.title || item.web.uri,
       url: item.web.uri
     }));
-}
-
-function extractGrokText(data) {
-  if (typeof data.output_text === "string") {
-    return data.output_text.trim();
-  }
-
-  const output = [];
-
-  for (const item of data.output || []) {
-    if (item.type === "message") {
-      for (const part of item.content || []) {
-        if (
-          (part.type === "output_text" ||
-           part.type === "text") &&
-          typeof part.text === "string"
-        ) {
-          output.push(part.text);
-        }
-      }
-    }
-  }
-
-  return output.join("\n").trim();
-}
-
-function extractGrokSources(data) {
-  const sources = [];
-
-  for (const item of data.output || []) {
-    for (const part of item.content || []) {
-      for (const annotation of part.annotations || []) {
-        const citation = annotation.url_citation;
-
-        if (citation?.url) {
-          sources.push({
-            title: citation.title || citation.url,
-            url: citation.url
-          });
-        }
-      }
-    }
-  }
-
-  return sources;
 }
 
 function appendSources(answer, sources) {
@@ -233,6 +124,87 @@ function appendSources(answer, sources) {
     ).join("\n");
 }
 
+function extractOwnModelText(data) {
+  const answer = data.choices?.[0]?.message?.content;
+
+  if (typeof answer === "string") {
+    return answer.trim();
+  }
+
+  if (Array.isArray(answer)) {
+    return answer
+      .filter(part => typeof part.text === "string")
+      .map(part => part.text)
+      .join("\n")
+      .trim();
+  }
+
+  return "";
+}
+
+// BM AI's future independent model.
+async function callOwnModel(message, history) {
+  if (!BM_MODEL_URL) {
+    throw new Error("BM AI model is not configured.");
+  }
+
+  const messages = [
+    {
+      role: "system",
+      content: SYSTEM_PROMPT
+    },
+    ...history,
+    {
+      role: "user",
+      content: message
+    }
+  ];
+
+  const headers = {
+    "Content-Type": "application/json"
+  };
+
+  if (BM_MODEL_KEY) {
+    headers.Authorization = "Bearer " + BM_MODEL_KEY;
+  }
+
+  const endpoint =
+    BM_MODEL_URL.replace(/\/+$/, "") +
+    "/v1/chat/completions";
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: headers,
+    body: JSON.stringify({
+      model: BM_MODEL_NAME,
+      messages: messages,
+      max_tokens: 2048,
+      temperature: 0.7
+    }),
+    signal: AbortSignal.timeout(80000)
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error(
+      "BM model API error:",
+      data.error?.message || response.status
+    );
+
+    throw new Error("BM AI model request failed.");
+  }
+
+  const answer = extractOwnModelText(data);
+
+  if (!answer) {
+    throw new Error("BM AI model returned an empty response.");
+  }
+
+  return answer;
+}
+
+// Google Gemini.
 async function callGemini(message, history, imageData) {
   if (!GEMINI_KEY) {
     throw new Error("Gemini API key is not configured.");
@@ -311,9 +283,7 @@ async function callGemini(message, history, imageData) {
       data.error?.message || response.status
     );
 
-    throw new Error(
-      data.error?.message || "Gemini request failed."
-    );
+    throw new Error("Gemini request failed.");
   }
 
   const answer = extractGeminiText(data);
@@ -328,158 +298,66 @@ async function callGemini(message, history, imageData) {
   );
 }
 
-async function callGrok(message, history, imageData) {
-  if (!XAI_KEY) {
-    throw new Error("Grok API key is not configured.");
-  }
+async function generateAnswer(message, history, imageData) {
 
-  const messages = [
-    {
-      role: "system",
-      content: SYSTEM_PROMPT
-    },
-    ...getHistory(history)
-  ];
-
+  // Images currently go directly to Gemini.
   if (imageData) {
-    if (!isValidImage(imageData)) {
-      throw new Error("Unsupported image format.");
-    }
+    return {
+      answer: await callGemini(
+        message,
+        history,
+        imageData
+      ),
+      provider: "gemini",
+      fallbackUsed: false
+    };
+  }
 
-    const match = imageData.match(
-      /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/
-    );
-
-    if (match[1] === "image/webp") {
-      throw new Error(
-        "Grok image requests currently require JPG or PNG."
+  // If our own model is configured, try it first.
+  if (BM_MODEL_URL) {
+    try {
+      const answer = await callOwnModel(
+        message,
+        history
       );
-    }
 
-    messages.push({
-      role: "user",
-      content: [
-        {
-          type: "text",
-          text: message
-        },
-        {
-          type: "image_url",
-          image_url: {
-            url: imageData,
-            detail: "high"
-          }
-        }
-      ]
-    });
+      return {
+        answer: answer,
+        provider: "bm-ai",
+        fallbackUsed: false
+      };
 
-    const response = await fetch(
-      "https://api.x.ai/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Bearer " + XAI_KEY
-        },
-        body: JSON.stringify({
-          model: GROK_MODEL,
-          messages: messages,
-          max_tokens: 2048
-        }),
-        signal: AbortSignal.timeout(80000)
-      }
-    );
-
-    const data = await response.json();
-
-    if (!response.ok) {
+    } catch (error) {
       console.error(
-        "Grok image error:",
-        data.error?.message || response.status
+        "BM AI model failed:",
+        error.message
       );
 
-      throw new Error(
-        data.error?.message || "Grok image request failed."
+      // Gemini becomes the fallback.
+      const answer = await callGemini(
+        message,
+        history,
+        null
       );
+
+      return {
+        answer: answer,
+        provider: "gemini",
+        fallbackUsed: true
+      };
     }
-
-    const answer = data.choices?.[0]?.message?.content;
-
-    if (typeof answer !== "string" || !answer.trim()) {
-      throw new Error("Grok returned an empty response.");
-    }
-
-    return answer.trim();
   }
 
-  const input = [
-    {
-      role: "system",
-      content: SYSTEM_PROMPT
-    },
-    ...getHistory(history),
-    {
-      role: "user",
-      content: message
-    }
-  ];
-
-  const requestBody = {
-    model: GROK_MODEL,
-    input: input,
-    max_output_tokens: 2048
+  // Until our model is hosted, use Gemini.
+  return {
+    answer: await callGemini(
+      message,
+      history,
+      null
+    ),
+    provider: "gemini",
+    fallbackUsed: false
   };
-
-  if (WEB_SEARCH_ENABLED) {
-    requestBody.tools = [
-      { type: "web_search" }
-    ];
-  }
-
-  const response = await fetch(
-    "https://api.x.ai/v1/responses",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + XAI_KEY
-      },
-      body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(80000)
-    }
-  );
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    console.error(
-      "Grok API error:",
-      data.error?.message || response.status
-    );
-
-    throw new Error(
-      data.error?.message || "Grok request failed."
-    );
-  }
-
-  const answer = extractGrokText(data);
-
-  if (!answer) {
-    throw new Error("Grok returned an empty response.");
-  }
-
-  return appendSources(
-    answer,
-    extractGrokSources(data)
-  );
-}
-
-async function generateAnswer(provider, message, history, imageData) {
-  if (provider === "grok") {
-    return await callGrok(message, history, imageData);
-  }
-
-  return await callGemini(message, history, imageData);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -515,14 +393,14 @@ const server = http.createServer(async (req, res) => {
       status: "healthy",
       service: "BM AI",
       providers: {
-        gemini: !!GEMINI_KEY,
-        grok: !!XAI_KEY
+        bmAi: !!BM_MODEL_URL,
+        gemini: !!GEMINI_KEY
       },
       automaticRouting: true,
       webSearch: WEB_SEARCH_ENABLED,
       vision: true,
       conversationMemory: true,
-      version: "2.0.0"
+      version: "3.0.0"
     });
   }
 
@@ -624,58 +502,17 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // Choose provider automatically.
-    const selectedProvider = selectProvider(
+    const result = await generateAnswer(
       message.trim(),
+      conversationMessages,
       imageData
     );
 
-    // Try the selected provider first.
-    const otherProvider =
-      selectedProvider === "gemini" ? "grok" : "gemini";
-
-    let answer;
-    let usedProvider = selectedProvider;
-    let firstError = null;
-
-    try {
-      answer = await generateAnswer(
-        selectedProvider,
-        message.trim(),
-        conversationMessages,
-        imageData
-      );
-    } catch (error) {
-      firstError = error;
-
-      console.error(
-        selectedProvider + " failed:",
-        error.message
-      );
-
-      // Automatically try the other configured provider.
-      const otherKey =
-        otherProvider === "gemini" ? GEMINI_KEY : XAI_KEY;
-
-      if (!otherKey) {
-        throw error;
-      }
-
-      usedProvider = otherProvider;
-
-      answer = await generateAnswer(
-        otherProvider,
-        message.trim(),
-        conversationMessages,
-        imageData
-      );
-    }
-
     return send(res, 200, {
-      answer: answer,
-      provider: usedProvider,
+      answer: result.answer,
+      provider: result.provider,
       automaticRouting: true,
-      fallbackUsed: usedProvider !== selectedProvider
+      fallbackUsed: result.fallbackUsed
     });
 
   } catch (error) {
@@ -697,7 +534,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(
-    "BM AI v2.0.0 running on port " + PORT
+    "BM AI v3.0.0 running on port " + PORT
   );
 
   console.log(
@@ -705,7 +542,11 @@ server.listen(PORT, "0.0.0.0", () => {
   );
 
   console.log(
-    "Grok configured: " + !!XAI_KEY
+    "BM AI own model configured: " + !!BM_MODEL_URL
+  );
+
+  console.log(
+    "Grok integration: removed"
   );
 
   console.log(
