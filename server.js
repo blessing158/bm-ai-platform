@@ -4,6 +4,19 @@ import { Agent, setGlobalDispatcher } from "undici";
 
 const PORT = process.env.PORT || 3000;
 
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
+const XAI_KEY = process.env.XAI_API_KEY;
+
+const GEMINI_MODEL =
+  process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
+
+const GROK_MODEL =
+  process.env.XAI_MODEL || "grok-4.7";
+
+// Search is disabled unless explicitly enabled.
+const WEB_SEARCH_ENABLED =
+  process.env.BM_AI_WEB_SEARCH_ENABLED === "true";
+
 setGlobalDispatcher(new Agent({
   headersTimeout: 90000,
   bodyTimeout: 90000,
@@ -16,163 +29,572 @@ You are BM AI, the official AI assistant developed by BM.DEVELOPERS.
 IDENTITY:
 - Your name is BM AI.
 - Your developer is BM.DEVELOPERS.
-- You use AI models provided through Groq.
-- You are not ChatGPT.
+- You use AI models from Google Gemini and xAI Grok.
 - Never claim OpenAI created BM AI.
-- Never claim BM.DEVELOPERS trained the underlying AI model.
+- Never claim BM.DEVELOPERS trained the underlying models.
 
-WHEN ASKED WHO CREATED YOU:
-Explain that BM AI was developed by BM.DEVELOPERS
-and uses AI models provided through Groq.
-
-CONVERSATION MEMORY:
-- Use the previous messages in the conversation as context.
-- Remember relevant details the user has already shared in this chat.
-- Understand follow-up questions using earlier messages.
-- Do not ask the user to repeat information already provided.
-- Keep your answers consistent with the conversation.
-- Do not pretend to remember messages that are not provided.
+CONVERSATION:
+- Use the supplied conversation history.
+- Understand follow-up questions.
+- Do not pretend to remember conversations that were not supplied.
+- Do not ask users to repeat information already provided.
 
 RESPONSE STYLE:
-- Answer the exact question asked.
-- Be concise, direct and relevant.
+- Answer the exact question.
 - Give the main answer first.
-- Use simple, natural language.
-- Default to 1-3 short paragraphs.
-- Do not add unrelated information.
-- Do not repeat the user's question.
-- Avoid unnecessary introductions and conclusions.
-- Use lists only when they improve clarity.
+- Be concise, natural and helpful.
+- Use simple language.
 - Give detailed explanations when requested.
-- Ask one clarification if the question is unclear.
 - Never invent facts.
-- Admit when you do not know something.
+- Admit when you do not know.
 
-WEB SEARCH:
-- Use browser search when information may be current,
-  unfamiliar, difficult to verify or about a less-known
-  public person, musician, business or event.
-- Do not search for every simple general-knowledge question.
-- Prefer reliable and relevant sources.
-- Do not confuse people with similar names.
-- If reliable information cannot be found, say so.
-- Never invent biographies, achievements or facts.
-- Mention useful source names or URLs when available.
+WEB RESEARCH:
+- Use search tools when available and useful.
+- Prefer reliable sources.
+- Never invent URLs, citations, biographies or achievements.
 - Clearly distinguish verified facts from uncertainty.
+- When you cannot verify something, say so.
 
 IMAGE QUESTIONS:
 - Carefully inspect uploaded images.
-- Answer the specific question about the image.
-- Avoid unrelated descriptions.
+- Answer the user's specific question about the image.
 
 MAIN RULE:
-Give users the information they need without unnecessary
-extra content.
+Give users accurate and useful information.
 
 Always represent BM AI and BM.DEVELOPERS accurately.
 `;
 
+function send(res, status, data) {
+  res.writeHead(status);
+  res.end(JSON.stringify(data));
+}
+
+function isValidImage(imageData) {
+  return typeof imageData === "string" &&
+    /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(imageData);
+}
+
+// Automatic provider selection.
+function selectProvider(message, imageData) {
+  if (imageData) {
+    return "gemini";
+  }
+
+  const text = message.toLowerCase();
+
+  // Questions that benefit from current information.
+  const researchPatterns = [
+    /\blatest\b/,
+    /\btoday\b/,
+    /\bcurrent\b/,
+    /\brecent\b/,
+    /\bnews\b/,
+    /\bsearch\b/,
+    /\blook up\b/,
+    /\bfind information\b/,
+    /\bsource\b/,
+    /\bwebsite\b/,
+    /\blink\b/,
+    /\bprice\b/,
+    /\bweather\b/,
+    /\bwho is\b/,
+    /\bwho was\b/,
+    /\bmusician\b/,
+    /\bsinger\b/,
+    /\bartist\b/,
+    /\bsong\b/,
+    /\bmusic\b/,
+    /\balbum\b/,
+    /\brelease date\b/,
+    /\bbiography\b/,
+    /\bdiscography\b/,
+    /\bwhere can i\b/,
+    /\bwhat happened\b/
+  ];
+
+  for (const pattern of researchPatterns) {
+    if (pattern.test(text)) {
+      return "grok";
+    }
+  }
+
+  // Name-like questions often need research.
+  const words = text.trim().split(/\s+/);
+
+  if (
+    words.length >= 2 &&
+    words.length <= 4 &&
+    text.length <= 65 &&
+    !/\b(the|and|but|because|please|thanks|explain)\b/.test(text)
+  ) {
+    return "grok";
+  }
+
+  // General knowledge, coding and reasoning default to Gemini.
+  return "gemini";
+}
+
+function getHistory(history) {
+  return history.map(item => ({
+    role: item.role,
+    content: item.content
+  }));
+}
+
+function extractGeminiText(data) {
+  const parts =
+    data.candidates?.[0]?.content?.parts || [];
+
+  return parts
+    .filter(part => typeof part.text === "string")
+    .map(part => part.text)
+    .join("\n")
+    .trim();
+}
+
+function extractGeminiSources(data) {
+  const chunks =
+    data.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+
+  return chunks
+    .filter(item => item.web?.uri)
+    .map(item => ({
+      title: item.web.title || item.web.uri,
+      url: item.web.uri
+    }));
+}
+
+function extractGrokText(data) {
+  if (typeof data.output_text === "string") {
+    return data.output_text.trim();
+  }
+
+  const output = [];
+
+  for (const item of data.output || []) {
+    if (item.type === "message") {
+      for (const part of item.content || []) {
+        if (
+          (part.type === "output_text" ||
+           part.type === "text") &&
+          typeof part.text === "string"
+        ) {
+          output.push(part.text);
+        }
+      }
+    }
+  }
+
+  return output.join("\n").trim();
+}
+
+function extractGrokSources(data) {
+  const sources = [];
+
+  for (const item of data.output || []) {
+    for (const part of item.content || []) {
+      for (const annotation of part.annotations || []) {
+        const citation = annotation.url_citation;
+
+        if (citation?.url) {
+          sources.push({
+            title: citation.title || citation.url,
+            url: citation.url
+          });
+        }
+      }
+    }
+  }
+
+  return sources;
+}
+
+function appendSources(answer, sources) {
+  const unique = [];
+  const seen = new Set();
+
+  for (const source of sources) {
+    if (!source.url || seen.has(source.url)) {
+      continue;
+    }
+
+    seen.add(source.url);
+    unique.push(source);
+  }
+
+  if (unique.length === 0) {
+    return answer;
+  }
+
+  return answer + "\n\nSources:\n" +
+    unique.slice(0, 6).map(source =>
+      "- " + source.title + ": " + source.url
+    ).join("\n");
+}
+
+async function callGemini(message, history, imageData) {
+  if (!GEMINI_KEY) {
+    throw new Error("Gemini API key is not configured.");
+  }
+
+  const contents = [];
+
+  for (const item of history) {
+    contents.push({
+      role: item.role === "assistant" ? "model" : "user",
+      parts: [{ text: item.content }]
+    });
+  }
+
+  const currentParts = [
+    { text: message }
+  ];
+
+  if (imageData) {
+    if (!isValidImage(imageData)) {
+      throw new Error("Unsupported image format.");
+    }
+
+    const match = imageData.match(
+      /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/
+    );
+
+    currentParts.push({
+      inlineData: {
+        mimeType: match[1],
+        data: match[2]
+      }
+    });
+  }
+
+  contents.push({
+    role: "user",
+    parts: currentParts
+  });
+
+  const requestBody = {
+    systemInstruction: {
+      parts: [{ text: SYSTEM_PROMPT }]
+    },
+    contents: contents,
+    generationConfig: {
+      maxOutputTokens: 2048
+    }
+  };
+
+  if (WEB_SEARCH_ENABLED && !imageData) {
+    requestBody.tools = [
+      { google_search: {} }
+    ];
+  }
+
+  const response = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/" +
+      GEMINI_MODEL + ":generateContent",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_KEY
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(80000)
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error(
+      "Gemini API error:",
+      data.error?.message || response.status
+    );
+
+    throw new Error(
+      data.error?.message || "Gemini request failed."
+    );
+  }
+
+  const answer = extractGeminiText(data);
+
+  if (!answer) {
+    throw new Error("Gemini returned an empty response.");
+  }
+
+  return appendSources(
+    answer,
+    extractGeminiSources(data)
+  );
+}
+
+async function callGrok(message, history, imageData) {
+  if (!XAI_KEY) {
+    throw new Error("Grok API key is not configured.");
+  }
+
+  const messages = [
+    {
+      role: "system",
+      content: SYSTEM_PROMPT
+    },
+    ...getHistory(history)
+  ];
+
+  if (imageData) {
+    if (!isValidImage(imageData)) {
+      throw new Error("Unsupported image format.");
+    }
+
+    const match = imageData.match(
+      /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/
+    );
+
+    if (match[1] === "image/webp") {
+      throw new Error(
+        "Grok image requests currently require JPG or PNG."
+      );
+    }
+
+    messages.push({
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: message
+        },
+        {
+          type: "image_url",
+          image_url: {
+            url: imageData,
+            detail: "high"
+          }
+        }
+      ]
+    });
+
+    const response = await fetch(
+      "https://api.x.ai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + XAI_KEY
+        },
+        body: JSON.stringify({
+          model: GROK_MODEL,
+          messages: messages,
+          max_tokens: 2048
+        }),
+        signal: AbortSignal.timeout(80000)
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error(
+        "Grok image error:",
+        data.error?.message || response.status
+      );
+
+      throw new Error(
+        data.error?.message || "Grok image request failed."
+      );
+    }
+
+    const answer = data.choices?.[0]?.message?.content;
+
+    if (typeof answer !== "string" || !answer.trim()) {
+      throw new Error("Grok returned an empty response.");
+    }
+
+    return answer.trim();
+  }
+
+  const input = [
+    {
+      role: "system",
+      content: SYSTEM_PROMPT
+    },
+    ...getHistory(history),
+    {
+      role: "user",
+      content: message
+    }
+  ];
+
+  const requestBody = {
+    model: GROK_MODEL,
+    input: input,
+    max_output_tokens: 2048
+  };
+
+  if (WEB_SEARCH_ENABLED) {
+    requestBody.tools = [
+      { type: "web_search" }
+    ];
+  }
+
+  const response = await fetch(
+    "https://api.x.ai/v1/responses",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + XAI_KEY
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(80000)
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error(
+      "Grok API error:",
+      data.error?.message || response.status
+    );
+
+    throw new Error(
+      data.error?.message || "Grok request failed."
+    );
+  }
+
+  const answer = extractGrokText(data);
+
+  if (!answer) {
+    throw new Error("Grok returned an empty response.");
+  }
+
+  return appendSources(
+    answer,
+    extractGrokSources(data)
+  );
+}
+
+async function generateAnswer(provider, message, history, imageData) {
+  if (provider === "grok") {
+    return await callGrok(message, history, imageData);
+  }
+
+  return await callGemini(message, history, imageData);
+}
+
 const server = http.createServer(async (req, res) => {
 
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader(
+    "Content-Type",
+    "application/json; charset=utf-8"
+  );
+
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type"
+  );
 
   if (req.method === "OPTIONS") {
     res.writeHead(204);
     return res.end();
   }
 
-  const pathname = new URL(req.url, "http://localhost").pathname;
+  const pathname = new URL(
+    req.url,
+    "http://localhost"
+  ).pathname;
 
+  // Health check.
   if (req.method === "GET" && pathname === "/") {
-    res.writeHead(200);
-    return res.end(JSON.stringify({
+    return send(res, 200, {
       status: "healthy",
       service: "BM AI",
-      provider: "Groq",
-      webSearch: true,
+      providers: {
+        gemini: !!GEMINI_KEY,
+        grok: !!XAI_KEY
+      },
+      automaticRouting: true,
+      webSearch: WEB_SEARCH_ENABLED,
       vision: true,
       conversationMemory: true,
-      version: "1.4.0"
-    }));
+      version: "2.0.0"
+    });
   }
 
   if (req.method !== "POST" || pathname !== "/api/chat") {
-    res.writeHead(404);
-    return res.end(JSON.stringify({
+    return send(res, 404, {
       error: "Not found"
-    }));
-  }
-
-  const apiKey = process.env.GROQ_API_KEY;
-
-  if (!apiKey) {
-    res.writeHead(500);
-    return res.end(JSON.stringify({
-      error: "Groq API key is not configured"
-    }));
+    });
   }
 
   try {
-
     const chunks = [];
     let totalSize = 0;
 
     for await (const chunk of req) {
-
       totalSize += chunk.length;
 
       if (totalSize > 12 * 1024 * 1024) {
-        res.writeHead(413);
-        return res.end(JSON.stringify({
-          error: "Request too large. Please choose a smaller photo."
-        }));
+        return send(res, 413, {
+          error: "Request too large. Choose a smaller photo."
+        });
       }
 
       chunks.push(chunk);
     }
 
-    const body = Buffer.concat(chunks).toString("utf8");
-
     let parsed;
 
     try {
-      parsed = JSON.parse(body || "{}");
+      parsed = JSON.parse(
+        Buffer.concat(chunks).toString("utf8") || "{}"
+      );
     } catch {
-      res.writeHead(400);
-      return res.end(JSON.stringify({
-        error: "Invalid JSON"
-      }));
+      return send(res, 400, {
+        error: "Invalid JSON."
+      });
     }
 
     const message = parsed.message;
     const imageData = parsed.imageData;
     const history = parsed.history || [];
 
-    if (typeof message !== "string" || !message.trim()) {
-      res.writeHead(400);
-      return res.end(JSON.stringify({
-        error: "Please provide a message"
-      }));
+    if (
+      typeof message !== "string" ||
+      !message.trim()
+    ) {
+      return send(res, 400, {
+        error: "Please provide a message."
+      });
     }
 
     if (!Array.isArray(history)) {
-      res.writeHead(400);
-      return res.end(JSON.stringify({
-        error: "Invalid conversation history"
-      }));
+      return send(res, 400, {
+        error: "Invalid conversation history."
+      });
     }
 
-    // Only accept the latest 20 previous messages.
-    // The current message is added separately below.
-    const recentHistory = history.slice(-20);
+    if (imageData && !isValidImage(imageData)) {
+      return send(res, 400, {
+        error: "Unsupported image format. Use JPG, PNG or WEBP."
+      });
+    }
 
+    if (imageData && imageData.length > 10 * 1024 * 1024) {
+      return send(res, 413, {
+        error: "Photo is too large."
+      });
+    }
+
+    const recentHistory = history.slice(-20);
     const conversationMessages = [];
 
     for (const item of recentHistory) {
-
       if (
         !item ||
         (item.role !== "user" && item.role !== "assistant") ||
@@ -180,10 +602,9 @@ const server = http.createServer(async (req, res) => {
         !item.content.trim() ||
         item.content.length > 4000
       ) {
-        res.writeHead(400);
-        return res.end(JSON.stringify({
-          error: "Invalid message in conversation history"
-        }));
+        return send(res, 400, {
+          error: "Invalid conversation history."
+        });
       }
 
       conversationMessages.push({
@@ -192,149 +613,73 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    const totalHistoryLength = conversationMessages.reduce(
+    const historyLength = conversationMessages.reduce(
       (total, item) => total + item.content.length,
       0
     );
 
-    if (totalHistoryLength > 30000) {
-      res.writeHead(400);
-      return res.end(JSON.stringify({
-        error: "Conversation is too long. Please start a new chat."
-      }));
+    if (historyLength > 30000) {
+      return send(res, 400, {
+        error: "Conversation too long. Start a new chat."
+      });
     }
 
-    let model = "openai/gpt-oss-20b";
-    let userContent = message.trim();
-
-    if (imageData) {
-
-      if (typeof imageData !== "string") {
-        res.writeHead(400);
-        return res.end(JSON.stringify({
-          error: "Invalid image data"
-        }));
-      }
-
-      const match = imageData.match(
-        /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/
-      );
-
-      if (!match) {
-        res.writeHead(400);
-        return res.end(JSON.stringify({
-          error: "Unsupported image format. Use JPG, PNG or WEBP."
-        }));
-      }
-
-      const mimeType = match[1];
-      const base64 = match[2];
-
-      if (base64.length > 10 * 1024 * 1024) {
-        res.writeHead(413);
-        return res.end(JSON.stringify({
-          error: "Photo is too large. Please choose a smaller photo."
-        }));
-      }
-
-      model = "qwen/qwen3.8-27b";
-
-      userContent = [
-        {
-          type: "text",
-          text: message.trim()
-        },
-        {
-          type: "image_url",
-          image_url: {
-            url: "data:" + mimeType + ";base64," + base64
-          }
-        }
-      ];
-    }
-
-    const messages = [
-      {
-        role: "system",
-        content: SYSTEM_PROMPT
-      },
-      ...conversationMessages,
-      {
-        role: "user",
-        content: userContent
-      }
-    ];
-
-    const requestBody = {
-      model: model,
-      messages: messages,
-      max_completion_tokens: 1024
-    };
-
-    // Browser search is enabled for text questions only.
-    if (!imageData) {
-      requestBody.tools = [
-        {
-          type: "browser_search"
-        }
-      ];
-
-      requestBody.reasoning_effort = "low";
-    }
-
-    const response = await fetch(
-      "https://api.groq.com/openai/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${apiKey}`
-        },
-        body: JSON.stringify(requestBody),
-        signal: AbortSignal.timeout(80000)
-      }
+    // Choose provider automatically.
+    const selectedProvider = selectProvider(
+      message.trim(),
+      imageData
     );
 
-    const responseText = await response.text();
+    // Try the selected provider first.
+    const otherProvider =
+      selectedProvider === "gemini" ? "grok" : "gemini";
 
-    let data;
+    let answer;
+    let usedProvider = selectedProvider;
+    let firstError = null;
 
     try {
-      data = JSON.parse(responseText);
-    } catch {
-      throw new Error("Groq returned an invalid response.");
+      answer = await generateAnswer(
+        selectedProvider,
+        message.trim(),
+        conversationMessages,
+        imageData
+      );
+    } catch (error) {
+      firstError = error;
+
+      console.error(
+        selectedProvider + " failed:",
+        error.message
+      );
+
+      // Automatically try the other configured provider.
+      const otherKey =
+        otherProvider === "gemini" ? GEMINI_KEY : XAI_KEY;
+
+      if (!otherKey) {
+        throw error;
+      }
+
+      usedProvider = otherProvider;
+
+      answer = await generateAnswer(
+        otherProvider,
+        message.trim(),
+        conversationMessages,
+        imageData
+      );
     }
 
-    if (!response.ok) {
-
-      console.error("Groq API error:", data.error?.message);
-
-      const status = response.status === 429
-        ? 429
-        : response.status >= 500
-          ? 503
-          : 502;
-
-      res.writeHead(status);
-
-      return res.end(JSON.stringify({
-        error: data.error?.message || "Groq request failed"
-      }));
-    }
-
-    const answer =
-      data.choices?.[0]?.message?.content ||
-      "No response received.";
-
-    res.writeHead(200);
-
-    return res.end(JSON.stringify({
-      answer: answer
-    }));
+    return send(res, 200, {
+      answer: answer,
+      provider: usedProvider,
+      automaticRouting: true,
+      fallbackUsed: usedProvider !== selectedProvider
+    });
 
   } catch (error) {
-
-    console.error("BM AI error:", error);
+    console.error("BM AI error:", error.message);
 
     const timedOut =
       error.name === "TimeoutError" ||
@@ -342,17 +687,29 @@ const server = http.createServer(async (req, res) => {
       error.code === "UND_ERR_HEADERS_TIMEOUT" ||
       error.code === "UND_ERR_BODY_TIMEOUT";
 
-    res.writeHead(timedOut ? 504 : 500);
-
-    return res.end(JSON.stringify({
+    return send(res, timedOut ? 504 : 502, {
       error: timedOut
-        ? "BM AI is taking too long to respond. Please try again."
-        : "Unable to process your request. Please try again."
-    }));
+        ? "BM AI is taking too long. Please try again."
+        : "Unable to process your request. Check your AI provider configuration."
+    });
   }
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log("BM AI v1.4.0 server running on port " + PORT);
+  console.log(
+    "BM AI v2.0.0 running on port " + PORT
+  );
+
+  console.log(
+    "Gemini configured: " + !!GEMINI_KEY
+  );
+
+  console.log(
+    "Grok configured: " + !!XAI_KEY
+  );
+
+  console.log(
+    "Automatic routing enabled."
+  );
 });
-                           
+  
