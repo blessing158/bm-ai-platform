@@ -4,6 +4,7 @@ import os
 import re
 
 import torch
+import torch.nn as nn
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
@@ -12,7 +13,7 @@ from bm_model import BM_AI_1M
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEVICE = torch.device("cpu")
 
-app = FastAPI(title="BM AI Model API")
+app = FastAPI(title="BM AI Model API", version="0.1.0")
 
 model = None
 vocab = None
@@ -35,24 +36,34 @@ def decode(token_ids):
 def load_model():
     global model, vocab, reverse_vocab
 
-    with open(
-        os.path.join(BASE_DIR, "bm_ai_tokenizer.json"),
-        "r",
-        encoding="utf-8"
-    ) as file:
+    tokenizer_path = os.path.join(
+        BASE_DIR, "bm_ai_tokenizer.json"
+    )
+
+    checkpoint_path = os.path.join(
+        BASE_DIR, "bm_ai_1m.pt"
+    )
+
+    with open(tokenizer_path, "r", encoding="utf-8") as file:
         vocab = json.load(file)
 
     checkpoint = torch.load(
-        os.path.join(BASE_DIR, "bm_ai_1m.pt"),
+        checkpoint_path,
         map_location=DEVICE,
         weights_only=True
     )
 
     if checkpoint["vocab_size"] != len(vocab):
-        raise RuntimeError("Tokenizer and model do not match")
+        raise RuntimeError(
+            "Tokenizer and model vocabulary do not match"
+        )
 
     model = BM_AI_1M(len(vocab)).to(DEVICE)
-    model.load_state_dict(checkpoint["model_state_dict"])
+
+    model.load_state_dict(
+        checkpoint["model_state_dict"]
+    )
+
     model.eval()
 
     reverse_vocab = {
@@ -79,12 +90,25 @@ def health():
         "status": "healthy",
         "service": "BM AI Model API",
         "model_loaded": model is not None,
-        "model": "BM AI-1M"
+        "model": "BM AI-1M",
+        "device": "cpu"
     }
 
 
 @app.post("/v1/chat/completions")
-def chat(request: ChatRequest):
+def chat(
+    request: ChatRequest,
+    authorization: str = Header(default="")
+):
+
+    expected_key = os.getenv("BM_AI_MODEL_API_KEY")
+
+    if expected_key and authorization != "Bearer " + expected_key:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key"
+        )
+
     if model is None:
         raise HTTPException(
             status_code=503,
@@ -106,6 +130,7 @@ def chat(request: ChatRequest):
     token_ids = token_ids[-255:]
 
     generated = []
+
     current = torch.tensor(
         [token_ids],
         dtype=torch.long,
@@ -117,9 +142,19 @@ def chat(request: ChatRequest):
         min(request.temperature, 2.0)
     )
 
+    max_tokens = max(
+        1,
+        min(request.max_tokens, 40)
+    )
+
     with torch.inference_mode():
-        for _ in range(max(1, min(request.max_tokens, 40))):
-            logits = model(current[:, -256:])[:, -1, :]
+
+        for _ in range(max_tokens):
+
+            logits = model(
+                current[:, -256:]
+            )[:, -1, :]
+
             probabilities = torch.softmax(
                 logits / temperature,
                 dim=-1
@@ -136,6 +171,7 @@ def chat(request: ChatRequest):
                 break
 
             generated.append(token)
+
             current = torch.cat(
                 [current, next_id],
                 dim=1
@@ -144,13 +180,18 @@ def chat(request: ChatRequest):
     answer = decode(generated)
 
     return {
+        "id": "bm-ai-test",
+        "object": "chat.completion",
         "model": "bm-ai-1m",
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": answer
-            },
-            "finish_reason": "length"
-        }],
-        "note": "Experimental untrained model."
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": answer
+                },
+                "finish_reason": "length"
+            }
+        ],
+        "note": "Experimental untrained model. Output is not meaningful yet."
 }
